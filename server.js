@@ -1,6 +1,24 @@
 const express = require("express");
 const crypto = require("crypto");
 
+// Speichert bereits verarbeitete eBay-Notification IDs
+const processedNotifications = new Set();
+
+function isDuplicate(notificationId) {
+  if (!notificationId) return false;
+  if (processedNotifications.has(notificationId)) return true;
+
+  processedNotifications.add(notificationId);
+
+  // Speicher klein halten
+  if (processedNotifications.size > 5000) {
+    processedNotifications.clear();
+  }
+
+  return false;
+}
+
+
 const app = express();
 app.use(express.json());
 app.set("trust proxy", true);
@@ -115,6 +133,13 @@ app.post(["/ebay/account-deletion", "/ebay/account-deletion/"], (req, res) => {
   res.status(200).send("OK");
 
   const payload = req.body;
+    const notificationId = payload?.notification?.notificationId;
+
+  if (isDuplicate(notificationId)) {
+    console.log("↩️ Duplicate notification — überspringe:", notificationId);
+    return;
+  }
+
   console.log("📩 eBay Lösch-Notification erhalten:");
   console.log(JSON.stringify(payload, null, 2));
 
