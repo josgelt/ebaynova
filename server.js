@@ -1,3 +1,4 @@
+const ENABLE_ALERTS = false;
 const express = require("express");
 const crypto = require("crypto");
 
@@ -158,11 +159,15 @@ app.post(["/ebay/account-deletion", "/ebay/account-deletion/"], (req, res) => {
   console.log("📩 Payload:", JSON.stringify(payload, null, 2));
 
   setImmediate(async () => {
-    try {
-      await sendMailgun(payload);
-    } catch (err) {
-      console.error("❌ Mailgun Versand fehlgeschlagen:", err?.message || err);
-    }
+if (ENABLE_EMAIL_ALERTS) {
+  try {
+    await sendMailgun(payload);
+  } catch (err) {
+    console.error("❌ Mailgun Versand fehlgeschlagen:", err?.message || err);
+  }
+} else {
+  console.log("📧 Email Alerts deaktiviert");
+}
 
     try {
       await notifyTelegram(payload);
