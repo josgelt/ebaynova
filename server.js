@@ -1,24 +1,6 @@
 const express = require("express");
 const crypto = require("crypto");
 
-// Speichert bereits verarbeitete eBay-Notification IDs
-const processedNotifications = new Set();
-
-function isDuplicate(notificationId) {
-  if (!notificationId) return false;
-  if (processedNotifications.has(notificationId)) return true;
-
-  processedNotifications.add(notificationId);
-
-  // Speicher klein halten
-  if (processedNotifications.size > 5000) {
-    processedNotifications.clear();
-  }
-
-  return false;
-}
-
-
 const app = express();
 app.use(express.json());
 app.set("trust proxy", true);
@@ -30,7 +12,7 @@ function buildEndpointFromReq(req) {
   return `${req.protocol}://${req.get("host")}${req.path}`;
 }
 
-// ===== DEDUPE HELFER =====
+// ===== DEDUPE (nur 1x pro Event) =====
 const processedKeys = new Set();
 
 function makeDedupeKey(payload) {
@@ -40,6 +22,7 @@ function makeDedupeKey(payload) {
   const fullId = n.notificationId || "";
   const baseId = fullId.includes("_") ? fullId.split("_")[0] : fullId;
 
+  // fallback: userId+eventDate (falls keine ID vorhanden)
   return baseId || `${d.userId || "noUserId"}|${n.eventDate || "noEventDate"}`;
 }
 
@@ -48,12 +31,12 @@ function isDuplicateKey(key) {
   if (processedKeys.has(key)) return true;
 
   processedKeys.add(key);
-  if (processedKeys.size > 10000) processedKeys.clear();
 
+  // Speicher klein halten
+  if (processedKeys.size > 10000) processedKeys.clear();
   return false;
 }
-// ===== ENDE DEDUPE HELFER =====
-
+// ===== ENDE DEDUPE =====
 
 async function notifyTelegram(payload) {
   const token = process.env.TG_BOT_TOKEN;
@@ -82,7 +65,7 @@ async function notifyTelegram(payload) {
     body: JSON.stringify({
       chat_id: chatId,
       text,
-      disable_web_page_preview: true
+      disable_web_page_preview: true,
     }),
   });
 
@@ -93,7 +76,6 @@ async function notifyTelegram(payload) {
 
   console.log("✅ Telegram Nachricht gesendet");
 }
-
 
 async function sendMailgun(payload) {
   const apiKey = process.env.MAILGUN_API_KEY;
@@ -134,8 +116,7 @@ async function sendMailgun(payload) {
     throw new Error(`Mailgun error ${resp.status}: ${body}`);
   }
 
-  const resultText = await resp.text();
-  console.log("📧 Mailgun OK:", resultText);
+  console.log("📧 Mailgun OK");
 }
 
 // ✅ GET: eBay Endpoint Validation (Challenge)
@@ -153,12 +134,13 @@ app.get(["/ebay/account-deletion", "/ebay/account-deletion/"], (req, res) => {
   return res.status(200).json({ challengeResponse: hash.digest("hex") });
 });
 
-// ✅ POST: eBay Notifications (immer sofort 200, Mail danach)
+// ✅ POST: eBay Notifications (immer sofort 200, Alarm nur 1x pro Event)
 app.post(["/ebay/account-deletion", "/ebay/account-deletion/"], (req, res) => {
   res.status(200).send("OK");
 
   const payload = req.body;
-    // Nur echte Account-Deletions beachten
+
+  // Nur echte Account-Deletions beachten
   const topic = payload?.metadata?.topic;
   if (topic !== "MARKETPLACE_ACCOUNT_DELETION") {
     console.log("ℹ️ Ignoriere Topic:", topic);
@@ -168,21 +150,12 @@ app.post(["/ebay/account-deletion", "/ebay/account-deletion/"], (req, res) => {
   const dedupeKey = makeDedupeKey(payload);
 
   if (isDuplicateKey(dedupeKey)) {
-    console.log("↩️ Duplicate Event – überspringe:", dedupeKey);
+    console.log("↩️ Duplicate Event – überspringe Alarm:", dedupeKey);
     return;
   }
 
   console.log("✅ Neues Deletion Event:", dedupeKey);
-
-    const notificationId = payload?.notification?.notificationId;
-
-  if (isDuplicate(notificationId)) {
-    console.log("↩️ Duplicate notification — überspringe:", notificationId);
-    return;
-  }
-
-  console.log("📩 eBay Lösch-Notification erhalten:");
-  console.log(JSON.stringify(payload, null, 2));
+  console.log("📩 Payload:", JSON.stringify(payload, null, 2));
 
   setImmediate(async () => {
     try {
@@ -198,7 +171,6 @@ app.post(["/ebay/account-deletion", "/ebay/account-deletion/"], (req, res) => {
     }
   });
 });
-
 
 app.get("/", (req, res) => res.send("✅ eBay Deletion Endpoint läuft"));
 
