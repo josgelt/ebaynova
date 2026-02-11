@@ -4,7 +4,7 @@ const app = express();
 app.use(express.json());
 
 // 🔐 eBay Verification Token
-const VERIFICATION_TOKEN = "ebayDel_9Kf7Q2xLp8Zr4Tn6Eb1Yh3DsUa8Wm5Vc";
+const VERIFICATION_TOKEN = "ebayDel9Kf7Q2xLp8Zr4Tn6Eb1Yh3DsUa8Wm5Vc";
 
 app.post("/ebay/account-deletion", (req, res) => {
   const token = req.headers["verification-token"] || req.headers["x-ebay-signature"];
