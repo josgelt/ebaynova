@@ -30,6 +30,31 @@ function buildEndpointFromReq(req) {
   return `${req.protocol}://${req.get("host")}${req.path}`;
 }
 
+// ===== DEDUPE HELFER =====
+const processedKeys = new Set();
+
+function makeDedupeKey(payload) {
+  const n = payload?.notification || {};
+  const d = n?.data || {};
+
+  const fullId = n.notificationId || "";
+  const baseId = fullId.includes("_") ? fullId.split("_")[0] : fullId;
+
+  return baseId || `${d.userId || "noUserId"}|${n.eventDate || "noEventDate"}`;
+}
+
+function isDuplicateKey(key) {
+  if (!key) return false;
+  if (processedKeys.has(key)) return true;
+
+  processedKeys.add(key);
+  if (processedKeys.size > 10000) processedKeys.clear();
+
+  return false;
+}
+// ===== ENDE DEDUPE HELFER =====
+
+
 async function notifyTelegram(payload) {
   const token = process.env.TG_BOT_TOKEN;
   const chatId = process.env.TG_CHAT_ID;
@@ -133,6 +158,22 @@ app.post(["/ebay/account-deletion", "/ebay/account-deletion/"], (req, res) => {
   res.status(200).send("OK");
 
   const payload = req.body;
+    // Nur echte Account-Deletions beachten
+  const topic = payload?.metadata?.topic;
+  if (topic !== "MARKETPLACE_ACCOUNT_DELETION") {
+    console.log("ℹ️ Ignoriere Topic:", topic);
+    return;
+  }
+
+  const dedupeKey = makeDedupeKey(payload);
+
+  if (isDuplicateKey(dedupeKey)) {
+    console.log("↩️ Duplicate Event – überspringe:", dedupeKey);
+    return;
+  }
+
+  console.log("✅ Neues Deletion Event:", dedupeKey);
+
     const notificationId = payload?.notification?.notificationId;
 
   if (isDuplicate(notificationId)) {
