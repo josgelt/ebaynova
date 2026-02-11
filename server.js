@@ -1,45 +1,61 @@
 const express = require("express");
 const crypto = require("crypto");
-const nodemailer = require("nodemailer");
 
 const app = express();
 app.use(express.json());
 app.set("trust proxy", true);
 
-// ✅ 32–80 Zeichen, nur alnum + _ + -
+// ✅ dein bestehender Token
 const VERIFICATION_TOKEN = "ebayDel9Kf7Q2xLp8Zr4Tn6Eb1Yh3DsUa8Wm5Vc";
 
 function buildEndpointFromReq(req) {
   return `${req.protocol}://${req.get("host")}${req.path}`;
 }
 
-async function sendDeletionMail(payload) {
-  const user = process.env.MAIL_USER;
-  const pass = process.env.MAIL_PASS;
+async function sendMailgun(payload) {
+  const apiKey = process.env.MAILGUN_API_KEY;
+  const domain = process.env.MAILGUN_DOMAIN;
   const to = process.env.MAIL_TO;
+  const from = process.env.MAIL_FROM || `eBay Deletion Bot <mailgun@${domain}>`;
 
-  if (!user || !pass || !to) {
-    console.log("⚠️ MAIL_USER/MAIL_PASS/MAIL_TO fehlt – Mail wird übersprungen.");
+  if (!apiKey || !domain || !to) {
+    console.log("⚠️ MAILGUN_API_KEY/MAILGUN_DOMAIN/MAIL_TO fehlt – Mail wird übersprungen.");
     return;
   }
 
-  // Transporter erst "just-in-time" erstellen (verhindert Start-/Crash-Probleme)
-  const transporter = nodemailer.createTransport({
-    service: "gmail",
-    auth: { user, pass },
+  const url = `https://api.mailgun.net/v3/${domain}/messages`;
+
+  const text =
+    "Eine eBay-Löschanfrage ist eingegangen.\n\nPayload (gekürzt):\n" +
+    JSON.stringify(payload, null, 2).slice(0, 8000);
+
+  const form = new URLSearchParams();
+  form.set("from", from);
+  form.set("to", to);
+  form.set("subject", "⚠️ eBay Account Deletion Request eingegangen");
+  form.set("text", text);
+
+  const auth = Buffer.from(`api:${apiKey}`).toString("base64");
+
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${auth}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: form.toString(),
   });
 
-  await transporter.sendMail({
-    from: `"eBay Deletion Endpoint" <${user}>`,
-    to,
-    subject: "⚠️ eBay Account Deletion Request eingegangen",
-    text:
-      "Eine eBay-Löschanfrage ist eingegangen.\n\nPayload:\n" +
-      JSON.stringify(payload, null, 2),
-  });
+  if (!resp.ok) {
+    const body = await resp.text();
+    throw new Error(`Mailgun error ${resp.status}: ${body}`);
+  }
+
+  const resultText = await resp.text();
+  console.log("📧 Mailgun OK:", resultText);
 }
 
-// ✅ GET: eBay Endpoint-Validation (Challenge)
+// ✅ GET: eBay Endpoint Validation (Challenge)
 app.get(["/ebay/account-deletion", "/ebay/account-deletion/"], (req, res) => {
   const challengeCode = req.query.challenge_code;
   if (!challengeCode) return res.status(400).json({ error: "missing challenge_code" });
@@ -54,22 +70,19 @@ app.get(["/ebay/account-deletion", "/ebay/account-deletion/"], (req, res) => {
   return res.status(200).json({ challengeResponse: hash.digest("hex") });
 });
 
-// ✅ POST: eBay Notifications (WICHTIG: sofort 200 zurückgeben)
+// ✅ POST: eBay Notifications (immer sofort 200, Mail danach)
 app.post(["/ebay/account-deletion", "/ebay/account-deletion/"], (req, res) => {
-  // 1) sofort antworten -> eBay happy, keine Timeouts/502
   res.status(200).send("OK");
 
-  // 2) danach erst Logging + Mail (asynchron)
   const payload = req.body;
   console.log("📩 eBay Lösch-Notification erhalten:");
   console.log(JSON.stringify(payload, null, 2));
 
   setImmediate(async () => {
     try {
-      await sendDeletionMail(payload);
-      console.log("📧 Mail gesendet (falls MAIL_* gesetzt).");
+      await sendMailgun(payload);
     } catch (err) {
-      console.error("❌ Mailversand fehlgeschlagen:", err?.message || err);
+      console.error("❌ Mailgun Versand fehlgeschlagen:", err?.message || err);
     }
   });
 });
