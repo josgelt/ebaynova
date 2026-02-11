@@ -12,6 +12,46 @@ function buildEndpointFromReq(req) {
   return `${req.protocol}://${req.get("host")}${req.path}`;
 }
 
+async function notifyTelegram(payload) {
+  const token = process.env.TG_BOT_TOKEN;
+  const chatId = process.env.TG_CHAT_ID;
+
+  if (!token || !chatId) {
+    console.log("⚠️ TG_BOT_TOKEN oder TG_CHAT_ID fehlt – Telegram übersprungen.");
+    return;
+  }
+
+  const n = payload?.notification || {};
+  const d = n?.data || {};
+
+  const text =
+    "⚠️ eBay Löschanfrage eingegangen\n\n" +
+    `notificationId: ${n.notificationId}\n` +
+    `eventDate: ${n.eventDate}\n` +
+    `userId: ${d.userId}\n` +
+    `username: ${d.username}`;
+
+  const url = `https://api.telegram.org/bot${token}/sendMessage`;
+
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text,
+      disable_web_page_preview: true
+    }),
+  });
+
+  if (!resp.ok) {
+    const body = await resp.text();
+    throw new Error(`Telegram error ${resp.status}: ${body}`);
+  }
+
+  console.log("✅ Telegram Nachricht gesendet");
+}
+
+
 async function sendMailgun(payload) {
   const apiKey = process.env.MAILGUN_API_KEY;
   const domain = process.env.MAILGUN_DOMAIN;
@@ -84,8 +124,15 @@ app.post(["/ebay/account-deletion", "/ebay/account-deletion/"], (req, res) => {
     } catch (err) {
       console.error("❌ Mailgun Versand fehlgeschlagen:", err?.message || err);
     }
+
+    try {
+      await notifyTelegram(payload);
+    } catch (err) {
+      console.error("❌ Telegram Versand fehlgeschlagen:", err?.message || err);
+    }
   });
 });
+
 
 app.get("/", (req, res) => res.send("✅ eBay Deletion Endpoint läuft"));
 
