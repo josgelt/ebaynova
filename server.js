@@ -3,16 +3,12 @@
  * - GET  /ebay/account-deletion  : challenge_code validation
  * - POST /ebay/account-deletion  : deletion notifications (ack immediately)
  *
- * Optional alerts:
- * - Telegram (TG_BOT_TOKEN + TG_CHAT_ID)
- * - Mailgun  (MAILGUN_API_KEY + MAILGUN_DOMAIN + MAIL_TO (+ optional MAIL_FROM))
- *
- * Enable/disable email alerts:
- * - ENABLE_EMAIL_ALERTS=true|false   (default: false)
+ * Daily digest (Telegram + optional Mailgun) once per day at 20:00 Europe/Vienna.
  */
 
 const express = require("express");
 const crypto = require("crypto");
+const cron = require("node-cron");
 
 const app = express();
 app.use(express.json());
@@ -21,61 +17,110 @@ app.set("trust proxy", true);
 // ====== CONFIG ======
 const VERIFICATION_TOKEN =
   process.env.EBAY_VERIFICATION_TOKEN ||
-  "ebayDel9Kf7Q2xLp8Zr4Tn6Eb1Yh3DsUa8Wm5Vc"; // fallback only; better set env var
+  "ebayDel9Kf7Q2xLp8Zr4Tn6Eb1Yh3DsUa8Wm5Vc"; // besser als ENV setzen
 
-const ENABLE_EMAIL_ALERTS =
-  (process.env.ENABLE_EMAIL_ALERTS || "false").toLowerCase() === "true";
+const ENABLE_TELEGRAM_DIGEST =
+  (process.env.ENABLE_TELEGRAM_DIGEST || "true").toLowerCase() === "true";
+
+const ENABLE_EMAIL_DIGEST =
+  (process.env.ENABLE_EMAIL_DIGEST || "false").toLowerCase() === "true";
+
+// Standard: täglich 20:00 in Europe/Vienna
+const DIGEST_CRON = process.env.DIGEST_CRON || "0 20 * * *"; // min hour day month weekday
+const DIGEST_TZ = process.env.DIGEST_TZ || "Europe/Vienna";
+
+// In-memory buffer cap (verhindert RAM-Explosion)
+const MAX_EVENTS_BUFFER = Number(process.env.MAX_EVENTS_BUFFER || 5000);
 // ====================
+
+// ===== In-memory Digest Store =====
+let bufferedEvents = [];
+let bufferedCountTotal = 0;
+
+function addToDigestBuffer(payload) {
+  const n = payload?.notification || {};
+  const d = n?.data || {};
+
+  const item = {
+    notificationId: n.notificationId || null,
+    eventDate: n.eventDate || null,
+    userId: d.userId || null,
+    username: d.username || null,
+  };
+
+  bufferedCountTotal += 1;
+
+  // Buffer nur bis MAX_EVENTS_BUFFER speichern, Count läuft weiter
+  if (bufferedEvents.length < MAX_EVENTS_BUFFER) {
+    bufferedEvents.push(item);
+  }
+}
+
+function buildDigestText() {
+  const countStored = bufferedEvents.length;
+  const countTotal = bufferedCountTotal;
+
+  if (countTotal === 0) {
+    return "✅ eBay Daily Digest\n\nKeine Löschanfragen in den letzten 24h.";
+  }
+
+  const userIds = new Set();
+  const usernames = new Map(); // username -> count
+
+  let first = null;
+  let last = null;
+
+  for (const e of bufferedEvents) {
+    if (e.userId) userIds.add(e.userId);
+    if (e.username) usernames.set(e.username, (usernames.get(e.username) || 0) + 1);
+
+    if (e.eventDate) {
+      if (!first || e.eventDate < first) first = e.eventDate;
+      if (!last || e.eventDate > last) last = e.eventDate;
+    }
+  }
+
+  // Top 5 usernames
+  const topUsernames = [...usernames.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5);
+
+  const lines = [];
+  lines.push("⚠️ eBay Daily Digest – Löschanfragen");
+  lines.push("");
+  lines.push(`Total Events (24h): ${countTotal}`);
+  lines.push(`Unique userIds (aus Buffer): ${userIds.size}`);
+  if (first || last) lines.push(`Zeitraum (aus Buffer): ${first || "?"} → ${last || "?"}`);
+  lines.push(`Buffer gespeichert: ${countStored}/${MAX_EVENTS_BUFFER}`);
+
+  if (topUsernames.length) {
+    lines.push("");
+    lines.push("Top usernames (aus Buffer):");
+    for (const [name, c] of topUsernames) lines.push(`- ${name}: ${c}`);
+  }
+
+  return lines.join("\n");
+}
+
+function resetDigestBuffer() {
+  bufferedEvents = [];
+  bufferedCountTotal = 0;
+}
+// ===== End Digest Store =====
 
 function buildEndpointFromReq(req) {
   return `${req.protocol}://${req.get("host")}${req.path}`;
 }
 
-// ===== DEDUPE (nur 1x pro Event) =====
-const processedKeys = new Set();
-
-function makeDedupeKey(payload) {
-  const n = payload?.notification || {};
-  const d = n?.data || {};
-
-  const fullId = n.notificationId || "";
-  const baseId = fullId.includes("_") ? fullId.split("_")[0] : fullId;
-
-  // fallback: userId+eventDate (falls keine ID vorhanden)
-  return baseId || `${d.userId || "noUserId"}|${n.eventDate || "noEventDate"}`;
-}
-
-function isDuplicateKey(key) {
-  if (!key) return false;
-  if (processedKeys.has(key)) return true;
-
-  processedKeys.add(key);
-
-  // Speicher klein halten
-  if (processedKeys.size > 10000) processedKeys.clear();
-  return false;
-}
-// ===== ENDE DEDUPE =====
-
-// ---- Optional: Telegram alert ----
-async function notifyTelegram(payload) {
+// ---- Telegram digest ----
+async function sendTelegram(text) {
   const token = process.env.TG_BOT_TOKEN;
   const chatId = process.env.TG_CHAT_ID;
 
   if (!token || !chatId) {
-    console.log("⚠️ TG_BOT_TOKEN oder TG_CHAT_ID fehlt – Telegram übersprungen.");
+    console.log("⚠️ TG_BOT_TOKEN oder TG_CHAT_ID fehlt – Telegram Digest übersprungen.");
     return;
   }
-
-  const n = payload?.notification || {};
-  const d = n?.data || {};
-
-  const text =
-    "⚠️ eBay Löschanfrage eingegangen\n\n" +
-    `notificationId: ${n.notificationId}\n` +
-    `eventDate: ${n.eventDate}\n` +
-    `userId: ${d.userId}\n` +
-    `username: ${d.username}`;
 
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
 
@@ -94,11 +139,11 @@ async function notifyTelegram(payload) {
     throw new Error(`Telegram error ${resp.status}: ${body}`);
   }
 
-  console.log("✅ Telegram Nachricht gesendet");
+  console.log("✅ Telegram Digest gesendet");
 }
 
-// ---- Optional: Mailgun alert ----
-async function sendMailgun(payload) {
+// ---- Mailgun digest ----
+async function sendMailgun(text) {
   const apiKey = process.env.MAILGUN_API_KEY;
   const domain = process.env.MAILGUN_DOMAIN;
   const to = process.env.MAIL_TO;
@@ -106,20 +151,16 @@ async function sendMailgun(payload) {
     process.env.MAIL_FROM || (domain ? `eBay Deletion Bot <mailgun@${domain}>` : "eBay Deletion Bot");
 
   if (!apiKey || !domain || !to) {
-    console.log("⚠️ MAILGUN_API_KEY/MAILGUN_DOMAIN/MAIL_TO fehlt – Mail wird übersprungen.");
+    console.log("⚠️ MAILGUN_API_KEY/MAILGUN_DOMAIN/MAIL_TO fehlt – Mail Digest übersprungen.");
     return;
   }
 
   const url = `https://api.mailgun.net/v3/${domain}/messages`;
 
-  const text =
-    "Eine eBay-Löschanfrage ist eingegangen.\n\nPayload (gekürzt):\n" +
-    JSON.stringify(payload, null, 2).slice(0, 8000);
-
   const form = new URLSearchParams();
   form.set("from", from);
   form.set("to", to);
-  form.set("subject", "⚠️ eBay Account Deletion Request eingegangen");
+  form.set("subject", "eBay Daily Digest – Account Deletion Requests");
   form.set("text", text);
 
   const auth = Buffer.from(`api:${apiKey}`).toString("base64");
@@ -138,8 +179,44 @@ async function sendMailgun(payload) {
     throw new Error(`Mailgun error ${resp.status}: ${body}`);
   }
 
-  console.log("📧 Mailgun OK");
+  console.log("📧 Mailgun Digest OK");
 }
+
+// ===== Daily Digest Scheduler =====
+cron.schedule(
+  DIGEST_CRON,
+  async () => {
+    try {
+      const text = buildDigestText();
+
+      if (ENABLE_TELEGRAM_DIGEST) {
+        try {
+          await sendTelegram(text);
+        } catch (err) {
+          console.error("❌ Telegram Digest fehlgeschlagen:", err?.message || err);
+        }
+      }
+
+      if (ENABLE_EMAIL_DIGEST) {
+        try {
+          await sendMailgun(text);
+        } catch (err) {
+          console.error("❌ Mailgun Digest fehlgeschlagen:", err?.message || err);
+        }
+      }
+
+      // Nach Versand immer resetten (auch wenn nur Telegram aktiv ist)
+      resetDigestBuffer();
+      console.log("🧹 Digest Buffer zurückgesetzt");
+    } catch (err) {
+      console.error("❌ Digest Job Crash:", err?.message || err);
+    }
+  },
+  { timezone: DIGEST_TZ }
+);
+
+console.log(`🕒 Daily Digest geplant: "${DIGEST_CRON}" TZ=${DIGEST_TZ}`);
+// ===== End Scheduler =====
 
 // ✅ GET: eBay Endpoint Validation (Challenge)
 app.get(["/ebay/account-deletion", "/ebay/account-deletion/"], (req, res) => {
@@ -156,50 +233,23 @@ app.get(["/ebay/account-deletion", "/ebay/account-deletion/"], (req, res) => {
   return res.status(200).json({ challengeResponse: hash.digest("hex") });
 });
 
-// ✅ POST: eBay Notifications (immer sofort 200, Alarm nur 1x pro Event)
+// ✅ POST: eBay Notifications (immer sofort 200, nur sammeln)
 app.post(["/ebay/account-deletion", "/ebay/account-deletion/"], (req, res) => {
-  // Always ACK quickly
   res.status(200).send("OK");
 
   const payload = req.body;
 
-  // Nur echte Account-Deletions beachten
   const topic = payload?.metadata?.topic;
   if (topic !== "MARKETPLACE_ACCOUNT_DELETION") {
     console.log("ℹ️ Ignoriere Topic:", topic);
     return;
   }
 
-  const dedupeKey = makeDedupeKey(payload);
-  if (isDuplicateKey(dedupeKey)) {
-    console.log("↩️ Duplicate Event – überspringe Alarm:", dedupeKey);
-    return;
-  }
-
-  console.log("✅ Neues Deletion Event:", dedupeKey);
-  console.log("📩 Payload:", JSON.stringify(payload, null, 2));
-
-  // Do alerts async, never block the webhook ACK
-  setImmediate(async () => {
-    if (ENABLE_EMAIL_ALERTS) {
-      try {
-        await sendMailgun(payload);
-      } catch (err) {
-        console.error("❌ Mailgun Versand fehlgeschlagen:", err?.message || err);
-      }
-    } else {
-      console.log("📧 Email Alerts deaktiviert");
-    }
-
-    try {
-      await notifyTelegram(payload);
-    } catch (err) {
-      console.error("❌ Telegram Versand fehlgeschlagen:", err?.message || err);
-    }
-  });
+  addToDigestBuffer(payload);
+  console.log("📥 Deletion Event gesammelt. total24h=", bufferedCountTotal, "stored=", bufferedEvents.length);
 });
 
-app.get("/", (_req, res) => res.send("✅ eBay Deletion Endpoint läuft"));
+app.get("/", (_req, res) => res.send("✅ eBay Deletion Endpoint läuft (Daily Digest aktiv)"));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("Server läuft auf Port", PORT));
