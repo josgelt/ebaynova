@@ -1,4 +1,16 @@
-const ENABLE_ALERTS = false;
+/**
+ * eBay Marketplace Account Deletion Endpoint (Node.js / Express)
+ * - GET  /ebay/account-deletion  : challenge_code validation
+ * - POST /ebay/account-deletion  : deletion notifications (ack immediately)
+ *
+ * Optional alerts:
+ * - Telegram (TG_BOT_TOKEN + TG_CHAT_ID)
+ * - Mailgun  (MAILGUN_API_KEY + MAILGUN_DOMAIN + MAIL_TO (+ optional MAIL_FROM))
+ *
+ * Enable/disable email alerts:
+ * - ENABLE_EMAIL_ALERTS=true|false   (default: false)
+ */
+
 const express = require("express");
 const crypto = require("crypto");
 
@@ -6,8 +18,14 @@ const app = express();
 app.use(express.json());
 app.set("trust proxy", true);
 
-// ✅ dein bestehender Token
-const VERIFICATION_TOKEN = "ebayDel9Kf7Q2xLp8Zr4Tn6Eb1Yh3DsUa8Wm5Vc";
+// ====== CONFIG ======
+const VERIFICATION_TOKEN =
+  process.env.EBAY_VERIFICATION_TOKEN ||
+  "ebayDel9Kf7Q2xLp8Zr4Tn6Eb1Yh3DsUa8Wm5Vc"; // fallback only; better set env var
+
+const ENABLE_EMAIL_ALERTS =
+  (process.env.ENABLE_EMAIL_ALERTS || "false").toLowerCase() === "true";
+// ====================
 
 function buildEndpointFromReq(req) {
   return `${req.protocol}://${req.get("host")}${req.path}`;
@@ -39,6 +57,7 @@ function isDuplicateKey(key) {
 }
 // ===== ENDE DEDUPE =====
 
+// ---- Optional: Telegram alert ----
 async function notifyTelegram(payload) {
   const token = process.env.TG_BOT_TOKEN;
   const chatId = process.env.TG_CHAT_ID;
@@ -78,11 +97,13 @@ async function notifyTelegram(payload) {
   console.log("✅ Telegram Nachricht gesendet");
 }
 
+// ---- Optional: Mailgun alert ----
 async function sendMailgun(payload) {
   const apiKey = process.env.MAILGUN_API_KEY;
   const domain = process.env.MAILGUN_DOMAIN;
   const to = process.env.MAIL_TO;
-  const from = process.env.MAIL_FROM || `eBay Deletion Bot <mailgun@${domain}>`;
+  const from =
+    process.env.MAIL_FROM || (domain ? `eBay Deletion Bot <mailgun@${domain}>` : "eBay Deletion Bot");
 
   if (!apiKey || !domain || !to) {
     console.log("⚠️ MAILGUN_API_KEY/MAILGUN_DOMAIN/MAIL_TO fehlt – Mail wird übersprungen.");
@@ -137,6 +158,7 @@ app.get(["/ebay/account-deletion", "/ebay/account-deletion/"], (req, res) => {
 
 // ✅ POST: eBay Notifications (immer sofort 200, Alarm nur 1x pro Event)
 app.post(["/ebay/account-deletion", "/ebay/account-deletion/"], (req, res) => {
+  // Always ACK quickly
   res.status(200).send("OK");
 
   const payload = req.body;
@@ -149,7 +171,6 @@ app.post(["/ebay/account-deletion", "/ebay/account-deletion/"], (req, res) => {
   }
 
   const dedupeKey = makeDedupeKey(payload);
-
   if (isDuplicateKey(dedupeKey)) {
     console.log("↩️ Duplicate Event – überspringe Alarm:", dedupeKey);
     return;
@@ -158,19 +179,17 @@ app.post(["/ebay/account-deletion", "/ebay/account-deletion/"], (req, res) => {
   console.log("✅ Neues Deletion Event:", dedupeKey);
   console.log("📩 Payload:", JSON.stringify(payload, null, 2));
 
+  // Do alerts async, never block the webhook ACK
   setImmediate(async () => {
-    const ENABLE_EMAIL_ALERTS =
-  (process.env.ENABLE_EMAIL_ALERTS || "false").toLowerCase() === "true";
-
-if (ENABLE_EMAIL_ALERTS) {
-  try {
-    await sendMailgun(payload);
-  } catch (err) {
-    console.error("❌ Mailgun Versand fehlgeschlagen:", err?.message || err);
-  }
-} else {
-  console.log("📧 Email Alerts deaktiviert");
-}
+    if (ENABLE_EMAIL_ALERTS) {
+      try {
+        await sendMailgun(payload);
+      } catch (err) {
+        console.error("❌ Mailgun Versand fehlgeschlagen:", err?.message || err);
+      }
+    } else {
+      console.log("📧 Email Alerts deaktiviert");
+    }
 
     try {
       await notifyTelegram(payload);
@@ -180,7 +199,7 @@ if (ENABLE_EMAIL_ALERTS) {
   });
 });
 
-app.get("/", (req, res) => res.send("✅ eBay Deletion Endpoint läuft"));
+app.get("/", (_req, res) => res.send("✅ eBay Deletion Endpoint läuft"));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("Server läuft auf Port", PORT));
