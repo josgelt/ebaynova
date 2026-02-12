@@ -1,6 +1,6 @@
 /**
  * eBay Marketplace Account Deletion Endpoint (Node.js / Express)
- * Daily Digest (Telegram + optional Mailgun) once per day.
+ * Daily Digest (Telegram + optional Mailgun) once per day okay.
  *
  * Required ENV:
  * - EBAY_VERIFICATION_TOKEN
