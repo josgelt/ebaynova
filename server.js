@@ -159,6 +159,9 @@ app.post(["/ebay/account-deletion", "/ebay/account-deletion/"], (req, res) => {
   console.log("📩 Payload:", JSON.stringify(payload, null, 2));
 
   setImmediate(async () => {
+    const ENABLE_EMAIL_ALERTS =
+  (process.env.ENABLE_EMAIL_ALERTS || "false").toLowerCase() === "true";
+
 if (ENABLE_EMAIL_ALERTS) {
   try {
     await sendMailgun(payload);
